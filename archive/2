@@ -1,0 +1,493 @@
+#include <TFT_eSPI.h>
+#include <HardwareSerial.h>
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+
+// ================= TFT =================
+TFT_eSPI tft = TFT_eSPI();
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
+#define LINE_HEIGHT 8
+#define MAX_COLS 50
+
+// ================= UART =================
+HardwareSerial SerialNMEA(2); // odbiór NMEA (RX na GPIO35)
+HardwareSerial SerialOut(1);  // wysyłka NMEA na GPIO22
+#define TX_PIN 22
+
+// ================= NMEA BUFFER =================
+char incomingData[128];
+uint8_t dataIndex = 0;
+int cursorY = 50;
+bool paused = false;
+
+// ================= TOUCH =================
+#define XPT2046_IRQ 36
+#define XPT2046_MOSI 32
+#define XPT2046_MISO 39
+#define XPT2046_CLK 25
+#define XPT2046_CS 33
+SPIClass touchSPI(VSPI);
+XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
+#define TS_MINX 300
+#define TS_MAXX 3800
+#define TS_MINY 300
+#define TS_MAXY 3800
+uint32_t lastTouch = 0;
+
+// ================= BAUD =================
+long baudRates[] = {4800, 9600, 19200, 38400, 57600, 115200};
+int baudIndex = 0;
+long currentBaud = 4800;
+const int numBauds = sizeof(baudRates) / sizeof(baudRates[0]);
+
+// ================= WEB =================
+WebServer server(80);
+String nmeaLog = "";
+String repeatSentences[4];
+unsigned long repeatInterval[4] = {1000, 1000, 1000, 1000};
+unsigned long lastRepeatTime[4] = {0, 0, 0, 0};
+bool repeatEnabled[4] = {false, false, false, false};
+
+// ================= NVS =================
+Preferences prefs;
+
+// ================= GET COLOR =================
+uint16_t getColor(const char *line)
+{
+  if (strncmp(line, "WEB:", 4) == 0)
+    return TFT_MAGENTA;
+  if (!strncmp(line, "$GPGGA", 6) || !strncmp(line, "$GPRMC", 6) || !strncmp(line, "$GPZDA", 6) ||
+      !strncmp(line, "$GPGLL", 6) || !strncmp(line, "$GPVTG", 6))
+    return TFT_GREEN;
+  if (!strncmp(line, "$GPHDT", 6) || !strncmp(line, "$GPHDG", 6))
+    return TFT_ORANGE;
+  if (!strncmp(line, "!AI", 3))
+    return TFT_RED;
+  return TFT_WHITE;
+}
+
+// ================= TFT INTERFACE =================
+void drawInterface()
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 10);
+  tft.print("Baud: ");
+  tft.print(currentBaud);
+
+  tft.fillRoundRect(150, 5, 50, 30, 5, TFT_BLUE);
+  tft.setTextColor(TFT_WHITE, TFT_BLUE);
+  tft.setTextSize(2);
+  tft.setCursor(165, 13);
+  tft.print("<");
+
+  tft.fillRoundRect(205, 5, 50, 30, 5, TFT_BLUE);
+  tft.setCursor(220, 13);
+  tft.print(">");
+
+  tft.fillRoundRect(260, 5, 55, 30, 5, paused ? TFT_RED : TFT_GREEN);
+  tft.setTextColor(TFT_BLACK, paused ? TFT_RED : TFT_GREEN);
+  tft.setTextSize(1);
+  tft.setCursor(268, 15);
+  tft.print(paused ? "PAUSE" : "RUN");
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  cursorY = 50;
+}
+
+void drawPauseButton()
+{
+  tft.fillRoundRect(260, 5, 55, 30, 5, paused ? TFT_RED : TFT_GREEN);
+  tft.setTextColor(TFT_BLACK, paused ? TFT_RED : TFT_GREEN);
+  tft.setCursor(268, 15);
+  tft.print(paused ? "PAUSE" : "RUN");
+}
+
+void printWrappedLine(const char *text, uint16_t color)
+{
+  tft.setTextColor(color, TFT_BLACK);
+  int len = strlen(text), pos = 0;
+  while (pos < len)
+  {
+    char line[MAX_COLS + 1];
+    int i = 0;
+    while (i < MAX_COLS && pos < len)
+    {
+      char c = text[pos++];
+      if (c == '\r')
+        continue;
+      if (c == '\n')
+        break;
+      line[i++] = c;
+    }
+    if (i == 0)
+      break;
+    line[i] = '\0';
+    tft.setCursor(0, cursorY);
+    tft.print(line);
+    cursorY += LINE_HEIGHT;
+    if (cursorY >= SCREEN_HEIGHT - LINE_HEIGHT)
+    {
+      tft.fillRect(0, 40, SCREEN_WIDTH, SCREEN_HEIGHT - 40, TFT_BLACK);
+      cursorY = 50;
+    }
+  }
+}
+
+// ================= BAUD CHANGE =================
+void changeBaud()
+{
+  currentBaud = baudRates[baudIndex];
+  SerialNMEA.end();
+  SerialNMEA.begin(currentBaud, SERIAL_8N1, 35, -1);
+  SerialOut.end();
+  SerialOut.begin(currentBaud, SERIAL_8N1, -1, TX_PIN);
+  drawInterface();
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setCursor(0, cursorY);
+  tft.println("Baud changed...");
+  cursorY += LINE_HEIGHT * 2;
+}
+
+// ================= NVS =================
+void saveConfigToNVS(int index)
+{
+  prefs.begin("nmea", false);
+  prefs.putString(("sent" + String(index)).c_str(), repeatSentences[index]);
+  prefs.putULong(("intv" + String(index)).c_str(), repeatInterval[index]);
+  prefs.putBool(("enab" + String(index)).c_str(), repeatEnabled[index]);
+  prefs.end();
+}
+
+void loadConfigFromNVS()
+{
+  prefs.begin("nmea", true);
+  for (int i = 0; i < 4; i++)
+  {
+    repeatSentences[i] = prefs.getString(("sent" + String(i)).c_str(), "");
+    repeatInterval[i] = prefs.getULong(("intv" + String(i)).c_str(), 1000);
+    repeatEnabled[i] = prefs.getBool(("enab" + String(i)).c_str(), false);
+  }
+  prefs.end();
+}
+
+// ================= HTML =================
+const char *htmlForm = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body { background:#000; color:#0f0; font-family: monospace; margin:10px;}
+input[type=text]{ width:60%; padding:5px; margin:5px; background:#222; color:#0f0; border:none; border-radius:3px;}
+input[type=number]{ width:15%; padding:5px; margin:5px; background:#222; color:#0f0; border:none; border-radius:3px;}
+button{ padding:5px 10px; border:none; border-radius:3px; font-weight:bold; margin:2px;}
+button.start.active{ background:#0f0; color:#000; }
+button.start.inactive{ background:#444; color:#aaa; }
+button.stop.active{ background:#f00; color:#fff; }
+button.stop.inactive{ background:#444; color:#aaa; }
+#log{ background:#111; padding:5px; height:300px; overflow-y: scroll; white-space: pre; margin-top:10px;}
+</style>
+</head>
+<body>
+<h2>NMEA Console</h2>
+<form action="javascript:void(0);">
+<input type="text" id="sentence0" placeholder="Enter NMEA sentence 1" onkeydown="if(event.keyCode==13) event.preventDefault();">
+<input type="number" id="interval0" value="1000" placeholder="ms">
+<button id="start0" class="start inactive" onclick="startSentence(0);return false;">Start</button>
+<button id="stop0" class="stop active" onclick="stopSentence(0);return false;">Stop</button><br>
+
+<input type="text" id="sentence1" placeholder="Enter NMEA sentence 2" onkeydown="if(event.keyCode==13) event.preventDefault();">
+<input type="number" id="interval1" value="1000" placeholder="ms">
+<button id="start1" class="start inactive" onclick="startSentence(1);return false;">Start</button>
+<button id="stop1" class="stop active" onclick="stopSentence(1);return false;">Stop</button><br>
+
+<input type="text" id="sentence2" placeholder="Enter NMEA sentence 3" onkeydown="if(event.keyCode==13) event.preventDefault();">
+<input type="number" id="interval2" value="1000" placeholder="ms">
+<button id="start2" class="start inactive" onclick="startSentence(2);return false;">Start</button>
+<button id="stop2" class="stop active" onclick="stopSentence(2);return false;">Stop</button><br>
+
+<input type="text" id="sentence3" placeholder="Enter NMEA sentence 4" onkeydown="if(event.keyCode==13) event.preventDefault();">
+<input type="number" id="interval3" value="1000" placeholder="ms">
+<button id="start3" class="start inactive" onclick="startSentence(3);return false;">Start</button>
+<button id="stop3" class="stop active" onclick="stopSentence(3);return false;">Stop</button><br>
+</form>
+<pre id="log"></pre>
+
+<script>
+let lastLogLength = 0;  // dodaj poza funkcją, na górze <script>
+
+function updateLog(){
+    fetch('/log?t=' + Date.now())  // <-- anty-cache
+    .then(resp=>resp.text())
+    .then(txt=>{
+        const logDiv = document.getElementById('log');
+        if (txt.length > lastLogLength) {
+            const newText = txt.substring(lastLogLength);
+            logDiv.textContent += newText;
+            lastLogLength = txt.length;
+        }
+        logDiv.scrollTop = logDiv.scrollHeight;
+    })
+    .catch(err => {
+        console.error("Błąd fetch logu:", err);
+        lastLogLength = 0; // reset przy błędzie
+    });
+}
+setInterval(updateLog, 500);
+
+function setButtonState(i, started){
+    const startBtn = document.querySelector('#start'+i);
+    const stopBtn = document.querySelector('#stop'+i);
+    if(started){
+        startBtn.className="start active";
+        stopBtn.className="stop inactive";
+    } else {
+        startBtn.className="start inactive";
+        stopBtn.className="stop active";
+    }
+}
+
+window.addEventListener("load", () => {
+  console.log("Ładuję konfigurację...");
+  fetch('/getSentences?v=' + Date.now())
+    .then(resp => {
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      return resp.json();
+    })
+    .then(data => {
+      console.log("Dane z ESP:", data);
+      for (let i = 0; i < 4; i++) {
+        const field = document.getElementById('sentence' + i);
+        if (field) {
+          field.value = data['sent' + i] || '';
+          console.log("Ustawiono sentence" + i + ": " + field.value);
+        }
+        document.getElementById('interval' + i).value = data['intv' + i] || 1000;
+        setButtonState(i, data['enab' + i] === true);
+      }
+    })
+    .catch(err => console.error("Błąd:", err));
+});
+
+function startSentence(i){
+    const sentence = encodeURIComponent(document.getElementById('sentence'+i).value);
+    const interval = document.getElementById('interval'+i).value;
+    fetch('/start'+i+'?interval='+interval+'&sentence='+sentence);
+    setButtonState(i, true);
+}
+function stopSentence(i){
+    fetch('/stop'+i);
+    setButtonState(i, false);
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ================= WEB HANDLERS =================
+void handleRoot()
+{
+  server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server.sendHeader("Pragma", "no-cache");
+  server.sendHeader("Expires", "0");
+  server.send(200, "text/html", htmlForm);
+}
+//void handleLog() {
+//  server.sendHeader("Cache-Control", "no-cache");
+//  server.send(200, "text/plain", nmeaLog);
+//}
+
+void handleGetSentences()
+{
+  String json = "{";
+  for (int i = 0; i < 4; i++)
+  {
+    if (i > 0) json += ",";
+
+    // Pełne escapowanie: backslash, cudzysłów, i znaki sterujące
+    String sent = repeatSentences[i];
+    sent.replace("\\", "\\\\");  // najpierw \\
+    sent.replace("\"", "\\\"");  // potem "
+    sent.replace("\n", "\\n");   // nowy wiersz
+    sent.replace("\r", "\\r");   // carriage return
+    sent.replace("\t", "\\t");   // tab (na wszelki wypadek)
+
+    json += "\"sent" + String(i) + "\":\"" + sent + "\"";
+    json += ",\"intv" + String(i) + "\":" + String(repeatInterval[i]);
+    json += ",\"enab" + String(i) + "\":" + (repeatEnabled[i] ? "true" : "false");
+  }
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+#define START_HANDLER(N)                                      \
+  void handleStart##N()                                       \
+  {                                                           \
+    repeatEnabled[N] = true;                                  \
+    if (server.hasArg("interval"))                            \
+    {                                                         \
+      long val = server.arg("interval").toInt();              \
+      if (val > 0)                                            \
+        repeatInterval[N] = val;                              \
+    }                                                         \
+    if (server.hasArg("sentence"))                            \
+    {                                                         \
+      repeatSentences[N] = server.arg("sentence");            \
+    }                                                         \
+    saveConfigToNVS(N);                                       \
+                                                              \
+    if (repeatSentences[N].length() > 0)                      \
+    {                                                         \
+      String toSend = repeatSentences[N] + "\r\n";            \
+      String s = "WEB:" + toSend;                             \
+      SerialOut.print(toSend);                                \
+      printWrappedLine(toSend.c_str(), TFT_MAGENTA);          \
+      nmeaLog += s;                                           \
+      if (nmeaLog.length() > 8000)                            \
+        nmeaLog = nmeaLog.substring(nmeaLog.length() - 4000); \
+    }                                                         \
+    server.send(200, "text/plain", "OK");                     \
+  }
+
+#define STOP_HANDLER(N)                   \
+  void handleStop##N()                    \
+  {                                       \
+    repeatEnabled[N] = false;             \
+    saveConfigToNVS(N);                   \
+    server.send(200, "text/plain", "OK"); \
+  }
+
+START_HANDLER(0)
+START_HANDLER(1)
+START_HANDLER(2)
+START_HANDLER(3)
+STOP_HANDLER(0)
+STOP_HANDLER(1)
+STOP_HANDLER(2)
+STOP_HANDLER(3)
+
+// ================= SETUP WEB =================
+void setupWeb()
+{
+  WiFi.softAP("ESP32_NMEA", "12345678");
+  IPAddress IP = WiFi.softAPIP();
+  tft.setCursor(0, 40);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.print("AP IP: ");
+  tft.println(IP);
+
+  // POPRAWNE – tylko jedna rejestracja /log
+  server.on("/log", HTTP_GET, []() {
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "0");
+    server.send(200, "text/plain", nmeaLog);
+  });
+
+  server.on("/getSentences", HTTP_GET, handleGetSentences);
+  server.on("/", handleRoot);
+
+  // Reszta handlerów...
+  server.on("/start0", HTTP_GET, handleStart0);
+  // ... itd.
+
+  server.begin();
+}
+
+// ================= SETUP =================
+void setup()
+{
+  tft.init();
+  tft.setRotation(1);
+  touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  ts.begin(touchSPI);
+  ts.setRotation(1);
+
+  SerialNMEA.begin(currentBaud, SERIAL_8N1, 35, -1);
+  SerialOut.begin(currentBaud, SERIAL_8N1, -1, TX_PIN);
+
+  loadConfigFromNVS();
+  drawInterface();
+  setupWeb();
+}
+
+// ================= LOOP =================
+void loop()
+{
+  server.handleClient();
+
+  // Powtarzanie zdań z web
+  for (int i = 0; i < 4; i++)
+  {
+    if (repeatEnabled[i] && repeatSentences[i].length() > 0)
+    {
+      unsigned long now = millis();
+      if (now - lastRepeatTime[i] >= repeatInterval[i])
+      {
+        String toSend = repeatSentences[i] + "\r\n";
+        String s = "WEB:" + toSend;
+        SerialOut.print(toSend);
+        printWrappedLine(toSend.c_str(), TFT_MAGENTA);
+        nmeaLog += s;
+        if (nmeaLog.length() > 8000)
+          nmeaLog = nmeaLog.substring(nmeaLog.length() - 6000);
+        lastRepeatTime[i] = now;
+      }
+    }
+  }
+
+  // TOUCH
+  if (ts.touched() && millis() - lastTouch > 200)
+  {
+    lastTouch = millis();
+    TS_Point p = ts.getPoint();
+    int16_t x = map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_WIDTH);
+    int16_t y = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_HEIGHT);
+    if (y < 40)
+    {
+      if (x > 150 && x < 200)
+      {
+        baudIndex = (baudIndex - 1 + numBauds) % numBauds;
+        changeBaud();
+      }
+      else if (x > 205 && x < 255)
+      {
+        baudIndex = (baudIndex + 1) % numBauds;
+        changeBaud();
+      }
+      else if (x > 260 && x < 315)
+      {
+        paused = !paused;
+        drawPauseButton();
+      }
+    }
+  }
+
+  // Odczyt NMEA z UART
+  while (SerialNMEA.available())
+  {
+    char c = SerialNMEA.read();
+    if (paused)
+      continue;
+    if (dataIndex < sizeof(incomingData) - 1)
+      incomingData[dataIndex++] = c;
+    if (c == '\n')
+    {
+      incomingData[dataIndex] = '\0';
+      dataIndex = 0;
+      uint16_t color = getColor(incomingData);
+      printWrappedLine(incomingData, color);
+      nmeaLog += String(incomingData) + "\n";
+      if (nmeaLog.length() > 8000)
+        nmeaLog = nmeaLog.substring(nmeaLog.length() - 4000);
+    }
+  }
+}
