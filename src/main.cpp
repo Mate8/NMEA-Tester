@@ -70,39 +70,76 @@ const unsigned long diagInterval = 1000;
 // ================= GET COLOR =================
 uint16_t getColor(const char *line)
 {
-  if (strncmp(line, "WEB:", 4) == 0) return TFT_MAGENTA;
+  if (strncmp(line, "WEB:", 4) == 0)
+    return TFT_MAGENTA;
   if (!strncmp(line, "$GPGGA", 6) || !strncmp(line, "$GPRMC", 6) || !strncmp(line, "$GPZDA", 6) ||
-      !strncmp(line, "$GPGLL", 6) || !strncmp(line, "$GPVTG", 6)) return TFT_GREEN;
-  if (!strncmp(line, "$GPHDT", 6) || !strncmp(line, "$GPHDG", 6)) return TFT_ORANGE;
-  if (!strncmp(line, "!AI", 3)) return TFT_RED;
+      !strncmp(line, "$GPGLL", 6) || !strncmp(line, "$GPVTG", 6))
+    return TFT_GREEN;
+  if (!strncmp(line, "$GPHDT", 6) || !strncmp(line, "$GPHDG", 6))
+    return TFT_ORANGE;
+  if (!strncmp(line, "!AI", 3))
+    return TFT_RED;
   return TFT_WHITE;
 }
 
-// ================= TFT INTERFACE =================
+// ================= DODATKOWE ZMIENNE GLOBALNE =================
+String wifiPassword = "12345678";   // hasło WiFi – możesz później zrobić edycję przez web
+bool wifiEnabled = true;            // stan WiFi AP
+unsigned long passwordShowTime = 0; // kiedy pokazano hasło (do auto-ukrycia)
+
+// ================= DRAW INTERFACE – Z NOWYMI PRZYCISKAMI =================
 void drawInterface()
 {
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, 10);
-  tft.print("Baud: ");
+  tft.setCursor(1, 1);
+  tft.print("BAUD: ");
+  tft.setTextSize(2);
+  tft.setCursor(1, 10);
   tft.print(currentBaud);
 
+  // Przycisk <
   tft.fillRoundRect(150, 5, 50, 30, 5, TFT_BLUE);
   tft.setTextColor(TFT_WHITE, TFT_BLUE);
   tft.setTextSize(2);
   tft.setCursor(165, 13);
   tft.print("<");
 
+  // Przycisk >
   tft.fillRoundRect(205, 5, 50, 30, 5, TFT_BLUE);
-  tft.setCursor(220, 13);
+  tft.setCursor(230, 13);
   tft.print(">");
 
+  // Przycisk PAUSE/RUN
   tft.fillRoundRect(260, 5, 55, 30, 5, paused ? TFT_RED : TFT_GREEN);
   tft.setTextColor(TFT_BLACK, paused ? TFT_RED : TFT_GREEN);
   tft.setTextSize(1);
   tft.setCursor(268, 15);
   tft.print(paused ? "PAUSE" : "RUN");
+
+  // NOWOŚĆ: Przycisk WiFi ON/OFF
+  uint16_t wifiColor = wifiEnabled ? TFT_RED : TFT_GREEN;
+  tft.fillRoundRect(95, 5, 55, 30, 5, wifiColor);
+  tft.setTextColor(TFT_BLACK, wifiColor);
+  tft.setTextSize(1);
+  tft.setCursor(100, 15);
+  tft.print(wifiEnabled ? "WiFi OFF" : "WiFi ON");
+
+  //// NOWOŚĆ: Przycisk PASS
+  // tft.fillRoundRect(70, 5, 70, 30, 5, TFT_ORANGE);
+  // tft.setTextColor(TFT_BLACK, TFT_ORANGE);
+  // tft.setCursor(80, 15);
+  // tft.print("PASS");
+
+  // Pokaz hasło jeśli wciśnięto przycisk (na 5 sekund)
+  if (millis() - passwordShowTime < 5000 && passwordShowTime > 0)
+  {
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.setCursor(10, 25);
+    tft.print("Pass: ");
+    tft.print(wifiPassword);
+  }
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(1);
@@ -128,11 +165,14 @@ void printWrappedLine(const char *text, uint16_t color)
     while (i < MAX_COLS && pos < len)
     {
       char c = text[pos++];
-      if (c == '\r') continue;
-      if (c == '\n') break;
+      if (c == '\r')
+        continue;
+      if (c == '\n')
+        break;
       line[i++] = c;
     }
-    if (i == 0) break;
+    if (i == 0)
+      break;
     line[i] = '\0';
     tft.setCursor(0, cursorY);
     tft.print(line);
@@ -155,8 +195,10 @@ void drawDiagnostics()
   uint8_t usedPercent = 100 - map(freeHeap, 0, totalHeap, 0, 100);
 
   uint16_t color = TFT_CYAN;
-  if (freeHeap < 30000) color = TFT_RED;
-  else if (freeHeap < 60000) color = TFT_YELLOW;
+  if (freeHeap < 30000)
+    color = TFT_RED;
+  else if (freeHeap < 60000)
+    color = TFT_YELLOW;
 
   tft.setTextColor(color, TFT_BLACK);
   tft.setCursor(0, SCREEN_HEIGHT - 16);
@@ -170,7 +212,8 @@ void drawDiagnostics()
   tft.print("%)");
 
   UBaseType_t stackHW = uxTaskGetStackHighWaterMark(NULL);
-  if (stackHW > 0) {
+  if (stackHW > 0)
+  {
     tft.print(" | Stack: ");
     tft.print(stackHW);
     tft.print("B");
@@ -231,7 +274,8 @@ String getLogTail(int maxLines)
     lines++;
   }
 
-  if (pos < 0) return nmeaLog;
+  if (pos < 0)
+    return nmeaLog;
   return nmeaLog.substring(pos + 1);
 }
 
@@ -386,7 +430,8 @@ void handleGetSentences()
   String json = "{";
   for (int i = 0; i < 4; i++)
   {
-    if (i > 0) json += ",";
+    if (i > 0)
+      json += ",";
     String sent = repeatSentences[i];
     sent.replace("\\", "\\\\");
     sent.replace("\"", "\\\"");
@@ -401,45 +446,51 @@ void handleGetSentences()
   server.send(200, "application/json", json);
 }
 
-#define START_HANDLER(N)                                      \
-  void handleStart##N()                                       \
-  {                                                           \
-    repeatEnabled[N] = true;                                  \
-    if (server.hasArg("interval")) repeatInterval[N] = server.arg("interval").toInt(); \
-    if (server.hasArg("sentence")) repeatSentences[N] = server.arg("sentence"); \
-    saveConfigToNVS(N);                                       \
-    if (repeatSentences[N].length() > 0)                      \
-    {                                                         \
-      String toSend = repeatSentences[N] + "\r\n";            \
-      String s = "WEB:" + toSend;                             \
-      SerialOut.print(toSend);                                \
-      printWrappedLine(toSend.c_str(), TFT_MAGENTA);          \
-      nmeaLog += s;                                           \
-      pushSSE(s);                                             \
-      logLineCount++;                                         \
-      while (logLineCount > MAX_LOG_LINES)                    \
-      {                                                       \
-        size_t pos = nmeaLog.indexOf("\r\n");                 \
-        if (pos == -1) pos = nmeaLog.indexOf('\n');           \
-        if (pos == -1) break;                                 \
+#define START_HANDLER(N)                                                   \
+  void handleStart##N()                                                    \
+  {                                                                        \
+    repeatEnabled[N] = true;                                               \
+    if (server.hasArg("interval"))                                         \
+      repeatInterval[N] = server.arg("interval").toInt();                  \
+    if (server.hasArg("sentence"))                                         \
+      repeatSentences[N] = server.arg("sentence");                         \
+    saveConfigToNVS(N);                                                    \
+    if (repeatSentences[N].length() > 0)                                   \
+    {                                                                      \
+      String toSend = repeatSentences[N] + "\r\n";                         \
+      String s = "WEB:" + toSend;                                          \
+      SerialOut.print(toSend);                                             \
+      printWrappedLine(toSend.c_str(), TFT_MAGENTA);                       \
+      nmeaLog += s;                                                        \
+      pushSSE(s);                                                          \
+      logLineCount++;                                                      \
+      while (logLineCount > MAX_LOG_LINES)                                 \
+      {                                                                    \
+        size_t pos = nmeaLog.indexOf("\r\n");                              \
+        if (pos == -1)                                                     \
+          pos = nmeaLog.indexOf('\n');                                     \
+        if (pos == -1)                                                     \
+          break;                                                           \
         nmeaLog.remove(0, pos + (pos == nmeaLog.indexOf("\r\n") ? 2 : 1)); \
-        logLineCount--;                                       \
-      }                                                       \
-    }                                                         \
-    server.send(200, "text/plain", "OK");                     \
+        logLineCount--;                                                    \
+      }                                                                    \
+    }                                                                      \
+    server.send(200, "text/plain", "OK");                                  \
   }
 
-#define STOP_HANDLER(N) \
-  void handleStop##N() { \
-    repeatEnabled[N] = false; \
+#define STOP_HANDLER(N)                   \
+  void handleStop##N()                    \
+  {                                       \
+    repeatEnabled[N] = false;             \
     server.send(200, "text/plain", "OK"); \
   }
 
-START_HANDLER(0) START_HANDLER(1) START_HANDLER(2) START_HANDLER(3)
-STOP_HANDLER(0) STOP_HANDLER(1) STOP_HANDLER(2) STOP_HANDLER(3)
+START_HANDLER(0)
+START_HANDLER(1) START_HANDLER(2) START_HANDLER(3)
+    STOP_HANDLER(0) STOP_HANDLER(1) STOP_HANDLER(2) STOP_HANDLER(3)
 
-// ================= SETUP WEB =================
-void setupWeb()
+    // ================= SETUP WEB =================
+    void setupWeb()
 {
   WiFi.softAP("ESP32_NMEA", "12345678");
   IPAddress IP = WiFi.softAPIP();
@@ -447,9 +498,11 @@ void setupWeb()
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.print("AP IP: ");
   tft.println(IP);
+   
 
   // SSE endpoint
-  server.on("/events", HTTP_GET, []() {
+  server.on("/events", HTTP_GET, []()
+            {
     WiFiClient client = server.client();
     if (!client) return;
 
@@ -466,14 +519,13 @@ void setupWeb()
     client.flush();
 
     sseClient = client;
-    sseConnected = true;
-  });
+    sseConnected = true; });
 
   // Fallback /log
-  server.on("/log", HTTP_GET, []() {
+  server.on("/log", HTTP_GET, []()
+            {
     server.sendHeader("Cache-Control", "no-cache");
-    server.send(200, "text/plain", getLogTail(50));
-  });
+    server.send(200, "text/plain", getLogTail(50)); });
 
   server.on("/getSentences", HTTP_GET, handleGetSentences);
   server.on("/", handleRoot);
@@ -488,6 +540,7 @@ void setupWeb()
   server.on("/stop3", HTTP_GET, handleStop3);
 
   server.begin();
+    WiFi.softAPdisconnect(true);
 }
 
 // ================= SETUP =================
@@ -535,8 +588,10 @@ void loop()
         while (logLineCount > MAX_LOG_LINES)
         {
           size_t pos = nmeaLog.indexOf("\r\n");
-          if (pos == -1) pos = nmeaLog.indexOf('\n');
-          if (pos == -1) break;
+          if (pos == -1)
+            pos = nmeaLog.indexOf('\n');
+          if (pos == -1)
+            break;
           nmeaLog.remove(0, pos + (pos == nmeaLog.indexOf("\r\n") ? 2 : 1));
           logLineCount--;
         }
@@ -545,6 +600,8 @@ void loop()
     }
   }
 
+  // ================= OBSŁUGA NOWYCH PRZYCISKÓW W LOOP =================
+  // TOUCH
   if (ts.touched() && millis() - lastTouch > 200)
   {
     lastTouch = millis();
@@ -553,17 +610,53 @@ void loop()
     int16_t y = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_HEIGHT);
     if (y < 40)
     {
-      if (x > 150 && x < 200) { baudIndex = (baudIndex - 1 + numBauds) % numBauds; changeBaud(); }
-      else if (x > 205 && x < 255) { baudIndex = (baudIndex + 1) % numBauds; changeBaud(); }
-      else if (x > 260 && x < 315) { paused = !paused; drawPauseButton(); }
+      if (x > 150 && x < 200)
+      {
+        baudIndex = (baudIndex - 1 + numBauds) % numBauds;
+        changeBaud();
+      }
+      else if (x > 205 && x < 255)
+      {
+        baudIndex = (baudIndex + 1) % numBauds;
+        changeBaud();
+      }
+      else if (x > 260 && x < 315)
+      {
+        paused = !paused;
+        drawPauseButton();
+      }
+      // NOWOŚĆ: WiFi ON/OFF
+      else if (x > 95 && x < 145)
+      {
+        wifiEnabled = !wifiEnabled;
+        if (wifiEnabled)
+        {
+          //WiFi.softAP("ESP32_NMEA", wifiPassword.c_str());
+          WiFi.softAPdisconnect(true);
+        }
+        else
+        {
+          //WiFi.softAPdisconnect(true);
+         WiFi.softAP("ESP32_NMEA", wifiPassword.c_str());
+        }
+        drawInterface(); // odśwież przycisk
+      }
+      // NOWOŚĆ: Pokaż hasło
+      // else if (x > 70 && x < 140)
+      //{
+      //  passwordShowTime = millis();
+      //  drawInterface();  // pokaż hasło
+      //}
     }
   }
 
   while (SerialNMEA.available())
   {
     char c = SerialNMEA.read();
-    if (paused) continue;
-    if (dataIndex < sizeof(incomingData) - 1) incomingData[dataIndex++] = c;
+    if (paused)
+      continue;
+    if (dataIndex < sizeof(incomingData) - 1)
+      incomingData[dataIndex++] = c;
     if (c == '\n')
     {
       incomingData[dataIndex] = '\0';
@@ -572,7 +665,8 @@ void loop()
       printWrappedLine(incomingData, color);
 
       String line = String(incomingData);
-      if (!line.endsWith("\r\n")) line += "\r\n";
+      if (!line.endsWith("\r\n"))
+        line += "\r\n";
 
       nmeaLog += line;
       pushSSE(line);
@@ -580,8 +674,10 @@ void loop()
       while (logLineCount > MAX_LOG_LINES)
       {
         size_t pos = nmeaLog.indexOf("\r\n");
-        if (pos == -1) pos = nmeaLog.indexOf('\n');
-        if (pos == -1) break;
+        if (pos == -1)
+          pos = nmeaLog.indexOf('\n');
+        if (pos == -1)
+          break;
         nmeaLog.remove(0, pos + (pos == nmeaLog.indexOf("\r\n") ? 2 : 1));
         logLineCount--;
       }
