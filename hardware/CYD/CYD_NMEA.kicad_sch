@@ -25122,7 +25122,7 @@
 	)
 	(symbol
 		(lib_id "Unknown_10_-1149")
-		(at 0 0.254 0)
+		(at 441.96 10.16 0)
 		(unit 0)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -25130,7 +25130,7 @@
 		(dnp no)
 		(uuid "66a4c30c-a46d-4f52-b6ca-99e7fad9b413")
 		(property "Reference" "A1"
-			(at 267.7668 82.5881 0)
+			(at 709.7268 92.4941 0)
 			(effects
 				(font
 					(face "Arial")
@@ -25141,7 +25141,7 @@
 			)
 		)
 		(property "Value" "A"
-			(at 267.589 84.9249 0)
+			(at 709.549 94.8309 0)
 			(effects
 				(font
 					(face "Arial")
@@ -25152,7 +25152,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 0 0.254 0)
+			(at 441.96 10.16 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -25161,7 +25161,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 0 0.254 0)
+			(at 441.96 10.16 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -25170,7 +25170,7 @@
 			)
 		)
 		(property "Description" ""
-			(at 0 0.254 0)
+			(at 441.96 10.16 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -25179,7 +25179,7 @@
 			)
 		)
 		(property "Manufacturer Part" "?"
-			(at 0 0.254 0)
+			(at 441.96 10.16 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -31697,4 +31697,10 @@
 			)
 		)
 	)
+	(sheet_instances
+		(path "/"
+			(page "1")
+		)
+	)
+	(embedded_fonts no)
 )

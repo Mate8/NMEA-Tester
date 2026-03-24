@@ -6,6 +6,8 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h> // watchdog
+#include <DNSServer.h>
+DNSServer dnsServer;
 
 // ================= TFT =================
 TFT_eSPI tft = TFT_eSPI();
@@ -50,7 +52,7 @@ WebServer server(80);
 String nmeaLog = "";
 const int MAX_LOG_LINES = 400;
 int logLineCount = 0;
-
+String webRawBuffer = "";
 String repeatSentences[4];
 unsigned long repeatInterval[4] = {1000, 1000, 1000, 1000};
 unsigned long lastRepeatTime[4] = {0, 0, 0, 0};
@@ -59,6 +61,10 @@ bool repeatEnabled[4] = {false, false, false, false};
 // SSE – prosta obsługa jednego klienta (wystarczy w 99% przypadków)
 WiFiClient sseClient;
 bool sseConnected = false;
+int rawX = 0;
+int rawY = 50;
+
+int webRawCounter = 0;
 
 // ================= NVS =================
 Preferences prefs;
@@ -120,10 +126,10 @@ void drawInterface()
 
   // NOWOŚĆ: Przycisk WiFi ON/OFF
   uint16_t wifiColor = wifiEnabled ? TFT_RED : TFT_GREEN;
-  tft.fillRoundRect(95, 5, 55, 30, 5, wifiColor);
+  tft.fillRoundRect(95, 5, 50, 30, 5, wifiColor);
   tft.setTextColor(TFT_BLACK, wifiColor);
   tft.setTextSize(1);
-  tft.setCursor(100, 15);
+  tft.setCursor(95, 15);
   tft.print(wifiEnabled ? "WiFi OFF" : "WiFi ON");
 
   //// NOWOŚĆ: Przycisk PASS
@@ -486,23 +492,27 @@ void handleGetSentences()
   }
 
 START_HANDLER(0)
-START_HANDLER(1) START_HANDLER(2) START_HANDLER(3)
-    STOP_HANDLER(0) STOP_HANDLER(1) STOP_HANDLER(2) STOP_HANDLER(3)
+START_HANDLER(1)
+START_HANDLER(2)
+START_HANDLER(3)
+STOP_HANDLER(0)
+STOP_HANDLER(1) STOP_HANDLER(2) STOP_HANDLER(3)
 
     // ================= SETUP WEB =================
-    void setupWeb()
+void setupWeb()
 {
-  WiFi.softAP("ESP32_NMEA", "12345678");
+  WiFi.softAP("NMEA_SNIFFER_192.168.4.1", "12345678");
+  dnsServer.start(53, "*", WiFi.softAPIP());
+
   IPAddress IP = WiFi.softAPIP();
   tft.setCursor(0, 40);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.print("AP IP: ");
   tft.println(IP);
-   
 
-  // SSE endpoint
+  // ================= SSE =================
   server.on("/events", HTTP_GET, []()
-            {
+  {
     WiFiClient client = server.client();
     if (!client) return;
 
@@ -519,16 +529,19 @@ START_HANDLER(1) START_HANDLER(2) START_HANDLER(3)
     client.flush();
 
     sseClient = client;
-    sseConnected = true; });
+    sseConnected = true;
+  });
 
-  // Fallback /log
+  // ================= LOG =================
   server.on("/log", HTTP_GET, []()
-            {
+  {
     server.sendHeader("Cache-Control", "no-cache");
-    server.send(200, "text/plain", getLogTail(50)); });
+    server.send(200, "text/plain", getLogTail(50));
+  });
 
-  server.on("/getSentences", HTTP_GET, handleGetSentences);
+  // ================= MAIN =================
   server.on("/", handleRoot);
+  server.on("/getSentences", HTTP_GET, handleGetSentences);
 
   server.on("/start0", HTTP_GET, handleStart0);
   server.on("/stop0", HTTP_GET, handleStop0);
@@ -539,8 +552,41 @@ START_HANDLER(1) START_HANDLER(2) START_HANDLER(3)
   server.on("/start3", HTTP_GET, handleStart3);
   server.on("/stop3", HTTP_GET, handleStop3);
 
+  // ================= CAPTIVE PORTAL =================
+
+  // Android
+  server.on("/generate_204", []()
+  {
+    server.send(200, "text/html", htmlForm);
+  });
+
+  server.on("/connecttest.txt", []()
+  {
+    server.send(200, "text/plain", "OK");
+  });
+
+  // Apple
+  server.on("/hotspot-detect.html", []()
+  {
+    server.send(200, "text/html", htmlForm);
+  });
+
+  // Windows
+  server.on("/ncsi.txt", []()
+  {
+    server.send(200, "text/plain", "Microsoft NCSI");
+  });
+
+  // Fallback – przekieruj wszystko
+  server.onNotFound([]()
+  {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
   server.begin();
-    WiFi.softAPdisconnect(true);
+
+  WiFi.softAPdisconnect(true);
 }
 
 // ================= SETUP =================
@@ -564,13 +610,12 @@ void setup()
   esp_task_wdt_add(NULL);
 }
 
-// ================= LOOP =================
 void loop()
 {
   esp_task_wdt_reset();
-
   server.handleClient();
 
+  // ================= REPEAT =================
   for (int i = 0; i < 4; i++)
   {
     if (repeatEnabled[i] && repeatSentences[i].length() > 0)
@@ -585,6 +630,7 @@ void loop()
         nmeaLog += s;
         pushSSE(s);
         logLineCount++;
+
         while (logLineCount > MAX_LOG_LINES)
         {
           size_t pos = nmeaLog.indexOf("\r\n");
@@ -595,19 +641,20 @@ void loop()
           nmeaLog.remove(0, pos + (pos == nmeaLog.indexOf("\r\n") ? 2 : 1));
           logLineCount--;
         }
+
         lastRepeatTime[i] = now;
       }
     }
   }
 
-  // ================= OBSŁUGA NOWYCH PRZYCISKÓW W LOOP =================
-  // TOUCH
+  // ================= TOUCH =================
   if (ts.touched() && millis() - lastTouch > 200)
   {
     lastTouch = millis();
     TS_Point p = ts.getPoint();
     int16_t x = map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_WIDTH);
     int16_t y = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_HEIGHT);
+
     if (y < 40)
     {
       if (x > 150 && x < 200)
@@ -625,44 +672,82 @@ void loop()
         paused = !paused;
         drawPauseButton();
       }
-      // NOWOŚĆ: WiFi ON/OFF
       else if (x > 95 && x < 145)
       {
         wifiEnabled = !wifiEnabled;
         if (wifiEnabled)
-        {
-          //WiFi.softAP("ESP32_NMEA", wifiPassword.c_str());
           WiFi.softAPdisconnect(true);
-        }
         else
-        {
-          //WiFi.softAPdisconnect(true);
-         WiFi.softAP("ESP32_NMEA", wifiPassword.c_str());
-        }
-        drawInterface(); // odśwież przycisk
+          WiFi.softAP("ESP32_NMEA", wifiPassword.c_str());
+
+        drawInterface();
       }
-      // NOWOŚĆ: Pokaż hasło
-      // else if (x > 70 && x < 140)
-      //{
-      //  passwordShowTime = millis();
-      //  drawInterface();  // pokaż hasło
-      //}
     }
   }
 
+  // ================= UART =================
   while (SerialNMEA.available())
   {
     char c = SerialNMEA.read();
     if (paused)
       continue;
+
+    // ================= LCD RAW =================
+    char out = c;
+    if (out < 32 || out > 126)
+      out = '.';
+
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.setCursor(rawX, rawY);
+    tft.print(out);
+
+    rawX += 6;
+
+    if (rawX > SCREEN_WIDTH - 6)
+    {
+      rawX = 0;
+      rawY += LINE_HEIGHT;
+    }
+
+    if (rawY > SCREEN_HEIGHT - 20)
+    {
+      tft.fillRect(0, 40, SCREEN_WIDTH, SCREEN_HEIGHT - 60, TFT_BLACK);
+      rawY = 50;
+    }
+
+    // ================= WEB RAW =================
+    char webChar = c;
+    if (webChar < 32 || webChar > 126)
+      webChar = '.';
+
+    webRawBuffer += webChar;
+
+    // wysyłaj tylko pełną linię
+    if (c == '\n')
+    {
+      pushSSE(webRawBuffer);
+      webRawBuffer = "";
+    }
+
+    dnsServer.processNextRequest();
+
+    // ================= NORMALNE NMEA =================
     if (dataIndex < sizeof(incomingData) - 1)
       incomingData[dataIndex++] = c;
+
     if (c == '\n')
     {
       incomingData[dataIndex] = '\0';
       dataIndex = 0;
+
       uint16_t color = getColor(incomingData);
       printWrappedLine(incomingData, color);
+
+      // synchronizacja kursora RAW
+      rawX = 0;
+      rawY = cursorY;
+
+      webRawCounter = 0;
 
       String line = String(incomingData);
       if (!line.endsWith("\r\n"))
@@ -671,6 +756,7 @@ void loop()
       nmeaLog += line;
       pushSSE(line);
       logLineCount++;
+
       while (logLineCount > MAX_LOG_LINES)
       {
         size_t pos = nmeaLog.indexOf("\r\n");
@@ -684,6 +770,7 @@ void loop()
     }
   }
 
+  // ================= DIAG =================
   if (millis() - lastDiagUpdate >= diagInterval)
   {
     drawDiagnostics();
